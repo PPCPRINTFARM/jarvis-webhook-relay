@@ -1,11 +1,14 @@
 {
   "name": "jarvis-webhook-relay",
-  "version": "1.0.0",
-  "description": "Receives Shopify Flow webhooks (draft + order) and SMS-pings Glen via QUO. No external dependencies — Node 20 fetch only.",
+  "version": "2.0.0",
+  "description": "Receives webhook traffic from N8N / Shopify Flow / CallRail / QUO / Retell and persists events to Postgres. Replaces the dead Mac Studio hub-api.",
   "main": "server.js",
   "type": "module",
   "scripts": {
     "start": "node server.js"
+  },
+  "dependencies": {
+    "pg": "^8.11.3"
   },
   "engines": {
     "node": ">=20"
