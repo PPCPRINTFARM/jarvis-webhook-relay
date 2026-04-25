@@ -1,0 +1,13 @@
+{
+  "name": "jarvis-webhook-relay",
+  "version": "1.0.0",
+  "description": "Receives Shopify Flow webhooks (draft + order) and SMS-pings Glen via QUO. No external dependencies — Node 20 fetch only.",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
