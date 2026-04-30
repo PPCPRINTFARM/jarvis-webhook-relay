@@ -18,9 +18,82 @@
 // ----------------------------------------------------------------------------
 
 import http from "node:http";
+import fs from "node:fs";
+import pathLib from "node:path";
+import { fileURLToPath } from "node:url";
 import pg from "pg";
 import crypto from "node:crypto";
 import { startPoller } from "./poller.js";
+
+const __dirname = pathLib.dirname(fileURLToPath(import.meta.url));
+const PUBLIC_DIR = pathLib.join(__dirname, "public");
+const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || "phoenix";
+const SESSION_COOKIE = "jarvis_session";
+
+function parseCookies(req) {
+  const out = {};
+  const h = req.headers["cookie"] || "";
+  for (const part of h.split(/;\s*/)) {
+    const [k, ...v] = part.split("=");
+    if (k) out[k] = decodeURIComponent(v.join("="));
+  }
+  return out;
+}
+
+const MIME = {
+  ".html": "text/html; charset=utf-8",
+  ".js":   "application/javascript; charset=utf-8",
+  ".css":  "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg":  "image/svg+xml",
+  ".png":  "image/png",
+  ".jpg":  "image/jpeg",
+  ".ico":  "image/x-icon",
+  ".woff2":"font/woff2",
+  ".woff": "font/woff",
+  ".map":  "application/json",
+};
+
+function safeJoin(root, p) {
+  const full = pathLib.normalize(pathLib.join(root, p));
+  if (!full.startsWith(root)) return null;
+  return full;
+}
+
+function serveStatic(res, relPath) {
+  const full = safeJoin(PUBLIC_DIR, relPath);
+  if (!full || !fs.existsSync(full) || !fs.statSync(full).isFile()) return false;
+  const ext = pathLib.extname(full).toLowerCase();
+  res.writeHead(200, {
+    "Content-Type": MIME[ext] || "application/octet-stream",
+    "Cache-Control": ext === ".html" ? "no-store" : "public, max-age=3600",
+  });
+  fs.createReadStream(full).pipe(res);
+  return true;
+}
+
+const LOGIN_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>Jarvis · Sign in</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+*{box-sizing:border-box}body{margin:0;background:#0b0d10;color:#e5e7eb;font:14px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;display:grid;place-items:center;min-height:100vh}
+.card{background:#13161b;border:1px solid #1f242c;border-radius:12px;padding:32px;width:340px;box-shadow:0 10px 40px rgba(0,0,0,.4)}
+.brand{display:flex;align-items:center;gap:10px;margin-bottom:20px}
+.logo{width:36px;height:36px;border-radius:8px;background:#dc2626;display:grid;place-items:center;font-weight:700;color:white}
+h1{margin:0;font-size:18px}
+.sub{color:#9ca3af;font-size:12px;margin-top:2px}
+label{display:block;font-size:12px;color:#9ca3af;margin:14px 0 6px}
+input{width:100%;padding:10px 12px;background:#0b0d10;border:1px solid #1f242c;border-radius:8px;color:#e5e7eb;font:inherit}
+input:focus{outline:none;border-color:#dc2626}
+button{width:100%;margin-top:18px;padding:10px;background:#dc2626;border:0;border-radius:8px;color:white;font-weight:600;cursor:pointer}
+.err{margin-top:12px;color:#fca5a5;font-size:12px;min-height:14px}
+</style></head><body>
+<form class="card" method="POST" action="/login">
+<div class="brand"><div class="logo">J</div><div><h1>Jarvis CRM</h1><div class="sub">Phoenix Phase Converters</div></div></div>
+<label>Password</label>
+<input type="password" name="password" autofocus autocomplete="current-password">
+<button>Sign in</button>
+<div class="err">{{ERR}}</div>
+</form></body></html>`;
 
 const { Pool } = pg;
 const PORT = process.env.PORT || 8080;
@@ -184,6 +257,9 @@ function checkToken(req, url) {
   // Bearer support so the dashboard can use Authorization: Bearer <token>
   const auth = req.headers["authorization"] || "";
   if (auth.startsWith("Bearer ") && auth.slice(7) === FLOW_TOKEN) return true;
+  // Session cookie (set after dashboard password login)
+  const cookies = parseCookies(req);
+  if (cookies[SESSION_COOKIE] === FLOW_TOKEN) return true;
   return false;
 }
 
@@ -376,14 +452,63 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
-    // ---- liveness
-    if (path === "/" && method === "GET") {
-      res.writeHead(200, { "Content-Type": "text/plain" });
-      return res.end("Jarvis Webhook Relay + Hub API\nOK\n");
+    // ---- dashboard login page (public)
+    if (path === "/login" && method === "GET") {
+      const cookies = parseCookies(req);
+      if (cookies[SESSION_COOKIE] === FLOW_TOKEN) {
+        res.writeHead(302, { Location: "/" });
+        return res.end();
+      }
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+      return res.end(LOGIN_HTML.replace("{{ERR}}", ""));
     }
+    if (path === "/login" && method === "POST") {
+      const raw = await readBody(req);
+      let pwd = "";
+      const ct = (req.headers["content-type"] || "").toLowerCase();
+      if (ct.includes("application/x-www-form-urlencoded")) {
+        pwd = new URLSearchParams(raw).get("password") || "";
+      } else {
+        try { pwd = (JSON.parse(raw).password) || ""; } catch {}
+      }
+      if (pwd && pwd === DASHBOARD_PASSWORD) {
+        const cookie = `${SESSION_COOKIE}=${encodeURIComponent(FLOW_TOKEN)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000`;
+        res.writeHead(302, { "Set-Cookie": cookie, Location: "/" });
+        return res.end();
+      }
+      res.writeHead(401, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+      return res.end(LOGIN_HTML.replace("{{ERR}}", "Wrong password"));
+    }
+    if (path === "/logout" && method === "GET") {
+      res.writeHead(302, { "Set-Cookie": `${SESSION_COOKIE}=; Path=/; Max-Age=0`, Location: "/login" });
+      return res.end();
+    }
+
+    // ---- dashboard SPA (serves /, /index.html, /assets/*) when logged in
+    if (method === "GET" && (path === "/" || path === "/index.html" || path.startsWith("/assets/"))) {
+      const cookies = parseCookies(req);
+      const authed = cookies[SESSION_COOKIE] === FLOW_TOKEN;
+      // Only static assets are served unauthenticated (so the bundle can load on the login page if needed).
+      // For "/" and index.html, redirect to /login if not authed.
+      if (path.startsWith("/assets/")) {
+        if (serveStatic(res, path)) return;
+      } else {
+        if (!authed) {
+          res.writeHead(302, { Location: "/login" });
+          return res.end();
+        }
+        if (serveStatic(res, "/index.html")) return;
+      }
+    }
+
     if (path === "/health" && method === "GET") {
       // Health is the ONLY anonymous endpoint — no DB counts leaked.
       return json(res, 200, { ok: true, db: dbReady }, req);
+    }
+    // ---- liveness fallback (text)
+    if (path === "/healthz" && method === "GET") {
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      return res.end("OK\n");
     }
 
     // EVERY other endpoint requires the token.
