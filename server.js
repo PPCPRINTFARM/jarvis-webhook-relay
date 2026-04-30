@@ -24,14 +24,21 @@ import crypto from "node:crypto";
 const { Pool } = pg;
 const PORT = process.env.PORT || 8080;
 
-const FLOW_TOKEN = process.env.FLOW_TOKEN
-  || "727s155a3u51692n670b7s036h2j4n1j5j091h597r3c053u2q1n515o5a3q6r7f";
+const FLOW_TOKEN = process.env.FLOW_TOKEN;
 
-const QUO_KEY = process.env.QUO_KEY || "0opOboF8pDshpmpGndl31aoqwm5ZLm23";
+const QUO_KEY = process.env.QUO_KEY;
 const QUO_SENDER = process.env.QUO_SENDER || "+16029628859";
 const GLEN = process.env.GLEN_PHONE || "+12513201372";
 
-const SHOP_TOKEN = process.env.SHOP_TOKEN || "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";
+const SHOP_TOKEN = process.env.SHOP_TOKEN;
+// Require all secrets at boot — fail fast if missing
+for (const [k, v] of Object.entries({ FLOW_TOKEN, QUO_KEY, SHOP_TOKEN })) {
+  if (!v) {
+    console.error(`FATAL: ${k} env var is required`);
+    process.exit(1);
+  }
+}
+
 const SHOP_STORE = process.env.SHOP_STORE || "electricmotorexperts.myshopify.com";
 
 const DRAFT_SMS_THRESHOLD = Number(process.env.DRAFT_SMS_THRESHOLD || 1000);

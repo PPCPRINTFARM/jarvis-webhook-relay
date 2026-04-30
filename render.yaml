@@ -9,15 +9,15 @@ services:
       - key: NODE_VERSION
         value: 20
       - key: FLOW_TOKEN
-        value: 727s155a3u51692n670b7s036h2j4n1j5j091h597r3c053u2q1n515o5a3q6r7f
+        sync: false
       - key: QUO_KEY
-        value: 0opOboF8pDshpmpGndl31aoqwm5ZLm23
+        sync: false
       - key: QUO_SENDER
         value: "+16029628859"
       - key: GLEN_PHONE
         value: "+12513201372"
       - key: SHOP_TOKEN
-        value: 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
+        sync: false
       - key: SHOP_STORE
         value: electricmotorexperts.myshopify.com
       - key: DRAFT_SMS_THRESHOLD
