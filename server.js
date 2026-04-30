@@ -20,6 +20,7 @@
 import http from "node:http";
 import pg from "pg";
 import crypto from "node:crypto";
+import { startPoller } from "./poller.js";
 
 const { Pool } = pg;
 const PORT = process.env.PORT || 8080;
@@ -486,5 +487,7 @@ initDb()
     server.listen(PORT, () => {
       console.log(`Jarvis Webhook Relay + Hub API on :${PORT}`);
       console.log(`  DB ready: ${dbReady}`);
+      // Start the CallRail/QUO/Shopify poller (env DISABLE_POLLER=1 to skip)
+      try { startPoller(insertEvent); } catch (e) { console.error("poller start err:", e.message); }
     });
   });
