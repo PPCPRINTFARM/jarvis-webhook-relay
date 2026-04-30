@@ -180,11 +180,30 @@ function checkToken(req, url) {
   const k = req.headers["x-api-key"] || req.headers["x-shopify-flow-token"];
   if (k && k === FLOW_TOKEN) return true;
   if (url.searchParams.get("token") === FLOW_TOKEN) return true;
+  // Bearer support so the dashboard can use Authorization: Bearer <token>
+  const auth = req.headers["authorization"] || "";
+  if (auth.startsWith("Bearer ") && auth.slice(7) === FLOW_TOKEN) return true;
   return false;
 }
 
-function json(res, code, obj) {
-  res.writeHead(code, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+// CORS allowlist. Set ALLOWED_ORIGINS env var to a comma-separated list.
+// If unset, defaults to the Perplexity Computer dashboard host.
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ||
+  "https://www.perplexity.ai,https://perplexity.ai")
+  .split(",").map(s => s.trim()).filter(Boolean);
+
+function corsOrigin(req) {
+  const o = req.headers["origin"] || "";
+  return ALLOWED_ORIGINS.includes(o) ? o : ALLOWED_ORIGINS[0];
+}
+
+function json(res, code, obj, req) {
+  const origin = req ? corsOrigin(req) : ALLOWED_ORIGINS[0];
+  res.writeHead(code, {
+    "Content-Type": "application/json",
+    "Access-Control-Allow-Origin": origin,
+    "Vary": "Origin",
+  });
   res.end(JSON.stringify(obj));
 }
 
@@ -346,9 +365,11 @@ const server = http.createServer(async (req, res) => {
   // CORS preflight
   if (method === "OPTIONS") {
     res.writeHead(204, {
-      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Origin": corsOrigin(req),
+      "Vary": "Origin",
       "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, X-Api-Key, X-Shopify-Flow-Token",
+      "Access-Control-Allow-Headers": "Content-Type, X-Api-Key, X-Shopify-Flow-Token, Authorization",
+      "Access-Control-Max-Age": "86400",
     });
     return res.end();
   }
@@ -360,45 +381,68 @@ const server = http.createServer(async (req, res) => {
       return res.end("Jarvis Webhook Relay + Hub API\nOK\n");
     }
     if (path === "/health" && method === "GET") {
-      let dbCount = null;
-      if (dbReady) {
-        try { const r = await pool.query("SELECT COUNT(*)::int AS n FROM events"); dbCount = r.rows[0].n; } catch {}
-      }
-      return json(res, 200, { ok: true, db: dbReady, events: dbCount, recent_count: RECENT.length });
+      // Health is the ONLY anonymous endpoint — no DB counts leaked.
+      return json(res, 200, { ok: true, db: dbReady }, req);
     }
 
-    // ---- log (auth)
+    // EVERY other endpoint requires the token.
+    if (!checkToken(req, url)) {
+      return json(res, 401, { error: "unauthorized" }, req);
+    }
+
+    // ---- log
     if (path === "/log" && method === "GET") {
-      if (!checkToken(req, url)) return json(res, 401, { error: "unauthorized" });
-      return json(res, 200, RECENT);
+      return json(res, 200, RECENT, req);
     }
 
     // ---- query: events for a phone
     if (path === "/events" && method === "GET") {
       const phone = url.searchParams.get("phone");
       const limit = Number(url.searchParams.get("limit") || 50);
-      if (!phone) return json(res, 400, { error: "missing phone param" });
+      if (!phone) return json(res, 400, { error: "missing phone param" }, req);
       const rows = await getEventsByPhone(phone, limit);
-      return json(res, 200, { phone, count: rows.length, events: rows });
+      return json(res, 200, { phone, count: rows.length, events: rows }, req);
     }
     if (path === "/events/recent" && method === "GET") {
       const source = url.searchParams.get("source");
       const limit = Number(url.searchParams.get("limit") || 50);
       const rows = await getRecentEvents(source, limit);
-      return json(res, 200, { count: rows.length, events: rows });
+      return json(res, 200, { count: rows.length, events: rows }, req);
     }
 
-    // ---- query: customer rollup
+    // ---- customer list rollup (for dashboard Customers tab)
+    if (path === "/customers" && method === "GET") {
+      const limit = Number(url.searchParams.get("limit") || 200);
+      try {
+        const r = await pool.query(
+          `SELECT from_addr AS phone,
+                  MAX(caller_name) AS name,
+                  COUNT(*) AS event_count,
+                  MAX(created_at) AS last_seen,
+                  MAX(CASE WHEN source LIKE 'shopify%' THEN order_num END) AS last_order
+           FROM events
+           WHERE from_addr IS NOT NULL AND from_addr <> ''
+           GROUP BY from_addr
+           ORDER BY MAX(created_at) DESC
+           LIMIT $1`,
+          [limit]
+        );
+        return json(res, 200, { count: r.rows.length, customers: r.rows }, req);
+      } catch (e) {
+        return json(res, 500, { error: e.message }, req);
+      }
+    }
+
+    // ---- query: customer rollup by phone
     if (path.startsWith("/customers/") && method === "GET") {
       const phone = decodeURIComponent(path.replace("/customers/", ""));
       const c = await getCustomer(phone);
       const events = await getEventsByPhone(phone, 25);
-      return json(res, 200, { customer: c, recent_events: events });
+      return json(res, 200, { customer: c, recent_events: events }, req);
     }
 
-    // ---- write paths (auth required)
+    // ---- write paths
     if (method === "POST" && path.startsWith("/")) {
-      if (!checkToken(req, url)) return json(res, 401, { error: "unauthorized" });
 
       const raw = await readBody(req);
       const payload = parseJsonOrFlow(raw);
@@ -414,7 +458,7 @@ const server = http.createServer(async (req, res) => {
         kind = "generic-event";
         result = await handleGenericEvent(payload);
       } else {
-        return json(res, 404, { error: "unknown path", path });
+        return json(res, 404, { error: "unknown path", path }, req);
       }
 
       logEvent({
@@ -424,13 +468,13 @@ const server = http.createServer(async (req, res) => {
         result,
       });
 
-      return json(res, result.ok ? 200 : 500, result);
+      return json(res, result.ok ? 200 : 500, result, req);
     }
 
-    return json(res, 404, { error: "not found", path });
+    return json(res, 404, { error: "not found", path }, req);
   } catch (e) {
     console.error("router err:", e);
-    return json(res, 500, { error: e.message });
+    return json(res, 500, { error: e.message }, req);
   }
 });
 
