@@ -10,18 +10,18 @@ const administrators = new Set([
 ]);
 
 const routes = new Map([
-  ["GET /", "/v1/health"],
-  ["GET /health", "/v1/health"],
-  ["GET /spine/v1/health", "/v1/health"],
-  ["GET /spine/v1/attention", "/v1/attention"],
-  ["POST /spine/v1/attention/actions", "/v1/attention/actions"],
+  ["GET /", { upstreamPath: "/v1/health", upstreamMethod: "GET", protected: false }],
+  ["GET /health", { upstreamPath: "/v1/health", upstreamMethod: "GET", protected: false }],
+  ["GET /spine/v1/health", { upstreamPath: "/v1/health", upstreamMethod: "GET", protected: false }],
+  ["POST /spine/v1/attention/read", { upstreamPath: "/v1/attention", upstreamMethod: "GET", protected: true }],
+  ["POST /spine/v1/attention/actions", { upstreamPath: "/v1/attention/actions", upstreamMethod: "POST", protected: true }],
 ]);
 
 function corsHeaders(origin) {
   return origin === siteOrigin ? {
     "access-control-allow-origin": siteOrigin,
     "access-control-allow-methods": "GET, POST, OPTIONS",
-    "access-control-allow-headers": "Content-Type, X-Phoenix-Relay-Session",
+    "access-control-allow-headers": "Content-Type",
     "access-control-max-age": "600",
     "vary": "Origin",
   } : {};
@@ -36,11 +36,11 @@ function json(req, res, status, body) {
   res.end(JSON.stringify(body));
 }
 
-function audit(method, pathname, status) {
-  console.log(JSON.stringify({ event: "relay_request", method, pathname, status }));
+function audit(method, pathname, status, stage) {
+  console.log(JSON.stringify({ event: "relay_request", method, pathname, status, ...(stage ? { stage } : {}) }));
 }
 
-async function readBody(req) {
+async function readJson(req) {
   const chunks = [];
   let total = 0;
   for await (const chunk of req) {
@@ -48,12 +48,15 @@ async function readBody(req) {
     if (total > maxBodyBytes) throw new Error("body_too_large");
     chunks.push(chunk);
   }
-  return Buffer.concat(chunks);
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    throw new Error("invalid_json");
+  }
 }
 
 async function openSession(encoded) {
   if (typeof encoded !== "string" || !encoded) throw new Error("missing_session");
-  console.log(JSON.stringify({ event: "relay_session", encoded_length: encoded.length }));
   const rawKey = Buffer.from(process.env.RELAY_SESSION_KEY || "", "base64");
   if (rawKey.length !== 32) throw new Error("invalid_session_key");
   const sealed = Buffer.from(encoded.replace(/-/g, "+").replace(/_/g, "/"), "base64");
@@ -83,24 +86,30 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "OPTIONS") {
     const origin = req.headers.origin;
     const status = origin === siteOrigin ? 204 : 403;
-    audit(req.method, pathname, status);
+    audit(req.method, pathname, status, "preflight");
     res.writeHead(status, { "cache-control": "no-store", ...corsHeaders(origin) });
     return res.end();
   }
 
-  const upstreamPath = routes.get(`${req.method} ${pathname}`);
+  const route = routes.get(`${req.method} ${pathname}`);
   if (!upstreamBaseUrl) {
-    audit(req.method, pathname, 503);
+    audit(req.method, pathname, 503, "configuration");
     return json(req, res, 503, { error: "relay_not_configured" });
   }
-  if (!upstreamPath) {
-    audit(req.method, pathname, 404);
+  if (!route) {
+    audit(req.method, pathname, 404, "routing");
     return json(req, res, 404, { error: "not_found" });
   }
 
   try {
-    const isProtected = pathname === "/spine/v1/attention" || pathname === "/spine/v1/attention/actions";
-    const session = isProtected ? await openSession(req.headers["x-phoenix-relay-session"]) : null;
+    let session = null;
+    let upstreamBody;
+    if (route.protected) {
+      const envelope = await readJson(req);
+      session = await openSession(envelope.session);
+      if (route.upstreamMethod === "POST") upstreamBody = JSON.stringify(envelope.payload ?? {});
+    }
+
     const headers = {
       accept: "application/json",
       "ngrok-skip-browser-warning": "phoenix-attention-relay",
@@ -109,18 +118,16 @@ const server = http.createServer(async (req, res) => {
       headers.authorization = `Bearer ${session.token}`;
       headers["x-phoenix-admin-email"] = session.email;
     }
-    if (req.method === "POST") headers["content-type"] = "application/json";
+    if (upstreamBody !== undefined) headers["content-type"] = "application/json";
 
-    const body = req.method === "POST" ? await readBody(req) : undefined;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 12_000);
-
     let response;
     try {
-      response = await fetch(`${upstreamBaseUrl}${upstreamPath}`, {
-        method: req.method,
+      response = await fetch(`${upstreamBaseUrl}${route.upstreamPath}`, {
+        method: route.upstreamMethod,
         headers,
-        body,
+        body: upstreamBody,
         signal: controller.signal,
       });
     } finally {
@@ -128,7 +135,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     const responseBody = Buffer.from(await response.arrayBuffer());
-    audit(req.method, pathname, response.status);
+    audit(req.method, pathname, response.status, "upstream_response");
     res.writeHead(response.status, {
       "content-type": response.headers.get("content-type") || "application/json; charset=utf-8",
       "cache-control": "no-store",
@@ -136,12 +143,12 @@ const server = http.createServer(async (req, res) => {
     });
     res.end(responseBody);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "";
-    const status = message === "body_too_large" ? 413 : message.includes("session") ? 401 : 502;
-    audit(req.method, pathname, status);
-    const errorCode = status === 413 ? "request_too_large" : status === 401 ? message : "upstream_unreachable";
-    console.log(JSON.stringify({ event: "relay_failure", stage: errorCode }));
-    json(req, res, status, { error: errorCode });
+    const message = error instanceof Error ? error.message : "unknown";
+    const status = message === "body_too_large" ? 413 : message === "invalid_json" ? 400 : message.includes("session") ? 401 : 502;
+    audit(req.method, pathname, status, message);
+    json(req, res, status, {
+      error: status === 413 ? "request_too_large" : status === 400 ? "invalid_request" : status === 401 ? message : "upstream_unreachable",
+    });
   }
 });
 
