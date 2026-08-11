@@ -53,16 +53,22 @@ async function readBody(req) {
 
 async function openSession(encoded) {
   if (typeof encoded !== "string" || !encoded) throw new Error("missing_session");
+  console.log(JSON.stringify({ event: "relay_session", encoded_length: encoded.length }));
   const rawKey = Buffer.from(process.env.RELAY_SESSION_KEY || "", "base64");
   if (rawKey.length !== 32) throw new Error("invalid_session_key");
   const sealed = Buffer.from(encoded.replace(/-/g, "+").replace(/_/g, "/"), "base64");
   if (sealed.length < 29) throw new Error("invalid_session");
   const key = await crypto.subtle.importKey("raw", rawKey, "AES-GCM", false, ["decrypt"]);
-  const clear = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: sealed.subarray(0, 12) },
-    key,
-    sealed.subarray(12),
-  );
+  let clear;
+  try {
+    clear = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: sealed.subarray(0, 12) },
+      key,
+      sealed.subarray(12),
+    );
+  } catch {
+    throw new Error("session_decrypt_failed");
+  }
   const payload = JSON.parse(new TextDecoder().decode(clear));
   const email = String(payload.email || "").toLowerCase();
   const exp = Number(payload.exp);
@@ -133,7 +139,9 @@ const server = http.createServer(async (req, res) => {
     const message = error instanceof Error ? error.message : "";
     const status = message === "body_too_large" ? 413 : message.includes("session") ? 401 : 502;
     audit(req.method, pathname, status);
-    json(req, res, status, { error: status === 413 ? "request_too_large" : status === 401 ? "unauthorized" : "upstream_unreachable" });
+    const errorCode = status === 413 ? "request_too_large" : status === 401 ? message : "upstream_unreachable";
+    console.log(JSON.stringify({ event: "relay_failure", stage: errorCode }));
+    json(req, res, status, { error: errorCode });
   }
 });
 
