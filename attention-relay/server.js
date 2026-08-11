@@ -5,6 +5,7 @@ const port = Number(process.env.PORT || 10000);
 const maxBodyBytes = 1024 * 1024;
 
 const routes = new Map([
+  ["GET /", "/v1/health"],
   ["GET /health", "/v1/health"],
   ["GET /spine/v1/health", "/v1/health"],
   ["GET /spine/v1/attention", "/v1/attention"],
@@ -17,6 +18,10 @@ function json(res, status, body) {
     "cache-control": "no-store",
   });
   res.end(JSON.stringify(body));
+}
+
+function audit(method, pathname, status) {
+  console.log(JSON.stringify({ event: "relay_request", method, pathname, status }));
 }
 
 async function readBody(req) {
@@ -34,8 +39,14 @@ const server = http.createServer(async (req, res) => {
   const pathname = new URL(req.url || "/", "http://relay").pathname;
   const upstreamPath = routes.get(`${req.method} ${pathname}`);
 
-  if (!upstreamBaseUrl) return json(res, 503, { error: "relay_not_configured" });
-  if (!upstreamPath) return json(res, 404, { error: "not_found" });
+  if (!upstreamBaseUrl) {
+    audit(req.method, pathname, 503);
+    return json(res, 503, { error: "relay_not_configured" });
+  }
+  if (!upstreamPath) {
+    audit(req.method, pathname, 404);
+    return json(res, 404, { error: "not_found" });
+  }
 
   try {
     const headers = {
@@ -65,6 +76,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     const responseBody = Buffer.from(await response.arrayBuffer());
+    audit(req.method, pathname, response.status);
     res.writeHead(response.status, {
       "content-type": response.headers.get("content-type") || "application/json; charset=utf-8",
       "cache-control": "no-store",
@@ -72,6 +84,7 @@ const server = http.createServer(async (req, res) => {
     res.end(responseBody);
   } catch (error) {
     const status = error instanceof Error && error.message === "body_too_large" ? 413 : 502;
+    audit(req.method, pathname, status);
     json(res, status, { error: status === 413 ? "request_too_large" : "upstream_unreachable" });
   }
 });
