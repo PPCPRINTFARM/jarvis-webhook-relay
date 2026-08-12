@@ -11,12 +11,12 @@ const administrators = new Set([
 ]);
 
 const routes = new Map([
-  ["GET /", { upstreamPath: "/v1/health", upstreamMethod: "GET", protected: false }],
-  ["GET /health", { upstreamPath: "/v1/health", upstreamMethod: "GET", protected: false }],
-  ["GET /spine/v1/health", { upstreamPath: "/v1/health", upstreamMethod: "GET", protected: false }],
-  ["POST /spine/v1/attention/read", { upstreamPath: "/v1/attention", upstreamMethod: "GET", protected: true }],
-  ["POST /spine/v1/attention/actions", { upstreamPath: "/v1/attention/actions", upstreamMethod: "POST", protected: true }],
-  ["POST /spine/v1/attention/drafts", { upstreamPath: "/v1/attention/drafts", upstreamMethod: "POST", protected: true }],
+  ["GET /", { upstreamPath: "/v1/health", upstreamMethod: "GET", protected: false, timeoutMs: 12_000 }],
+  ["GET /health", { upstreamPath: "/v1/health", upstreamMethod: "GET", protected: false, timeoutMs: 12_000 }],
+  ["GET /spine/v1/health", { upstreamPath: "/v1/health", upstreamMethod: "GET", protected: false, timeoutMs: 12_000 }],
+  ["POST /spine/v1/attention/read", { upstreamPath: "/v1/attention", upstreamMethod: "GET", protected: true, timeoutMs: 20_000 }],
+  ["POST /spine/v1/attention/actions", { upstreamPath: "/v1/attention/actions", upstreamMethod: "POST", protected: true, timeoutMs: 30_000 }],
+  ["POST /spine/v1/attention/drafts", { upstreamPath: "/v1/attention/drafts", upstreamMethod: "POST", protected: true, timeoutMs: 120_000 }],
 ]);
 
 function corsHeaders(origin) {
@@ -112,7 +112,7 @@ const server = http.createServer(async (req, res) => {
     if (upstreamBody !== undefined) headers["content-type"] = "application/json";
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 12_000);
+    const timer = setTimeout(() => controller.abort(), route.timeoutMs);
     let response;
     try {
       response = await fetch(`${upstreamBaseUrl}${route.upstreamPath}`, {
@@ -136,10 +136,11 @@ const server = http.createServer(async (req, res) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : "unknown";
     const status = message === "body_too_large" ? 413 : message === "invalid_json" ? 400 : message === "relay_unauthorized" ? 401 : message === "administrator_forbidden" ? 403 : 502;
-    const stage = status === 413 ? "request_too_large" : status === 400 ? "invalid_request" : status === 401 ? "relay_authentication" : status === 403 ? "administrator_authorization" : message === "AbortError" ? "upstream_timeout" : "upstream_request";
+    const timedOut = error instanceof Error && error.name === "AbortError";
+    const stage = status === 413 ? "request_too_large" : status === 400 ? "invalid_request" : status === 401 ? "relay_authentication" : status === 403 ? "administrator_authorization" : timedOut ? "upstream_timeout" : "upstream_request";
     audit(req.method, pathname, status, stage);
     json(req, res, status, {
-      error: status === 413 ? "request_too_large" : status === 400 ? "invalid_request" : status === 401 ? "unauthorized" : status === 403 ? "forbidden" : "upstream_unreachable",
+      error: status === 413 ? "request_too_large" : status === 400 ? "invalid_request" : status === 401 ? "unauthorized" : status === 403 ? "forbidden" : timedOut ? "upstream_timeout" : "upstream_unreachable",
     });
   }
 });
