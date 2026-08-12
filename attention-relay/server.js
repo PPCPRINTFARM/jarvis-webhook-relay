@@ -15,7 +15,7 @@ const routes = new Map([
   ["GET /health", { upstreamPath: "/v1/health", upstreamMethod: "GET", protected: false }],
   ["GET /spine/v1/health", { upstreamPath: "/v1/health", upstreamMethod: "GET", protected: false }],
   ["POST /spine/v1/attention/read", { upstreamPath: "/v1/attention", upstreamMethod: "GET", protected: true }],
-  ["POST /spine/v1/attention/actions", { upstreamPath: "/v1/attention/actions", upstreamMethod: "POST", protected: true }],
+  ["POST /spine/v1/attention/actions", { upstreamPath: "/v1/attention/actions", upstreamMethod: "POST", protected: true }],\n  ["POST /spine/v1/attention/drafts", { upstreamPath: "/v1/attention/drafts", upstreamMethod: "POST", protected: true }],
 ]);
 
 function corsHeaders(origin) {
